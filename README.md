@@ -49,7 +49,7 @@ MedIT One now features custom CUDA kernels for maximum performance:
 
 ## Performance Benefits
 
-- **10-100x Faster Inference**: Dramatically reduced computation needed per token
+- **Faster Inference**: Dramatically reduced computation needed per token
 - **Constant Memory Usage**: Memory requirements don't increase with sequence length
 - **Unbounded Context Length**: Theoretically unlimited context length with efficient state management
 - **GPU Acceleration**: With CUDA Turbo mode enabled, achieves near-theoretical peak performance on supported hardware
