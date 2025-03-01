@@ -377,15 +377,6 @@ class One(nn.Module):
                 hidden_state_sum = turbo_cumsum_and_normalize(source, s)
             else:
                 hidden_state_sum = torch.cumsum(source, dim=1)
-
-                # Safe normalization to prevent division by zero
-                seq_range = torch.arange(
-                    1,
-                    kv_seq + 1,
-                    device=hidden_states.device,
-                    dtype=hidden_states.dtype,
-                ).view(1, -1, 1)
-                hidden_state_sum = hidden_state_sum / (seq_range + 1e-10)
         else:
             kv_seq -= 1
             if kv_seq > 0:
