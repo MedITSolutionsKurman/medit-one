@@ -23,8 +23,11 @@ def rotate_half(x):
     return torch.cat((-x2, x1), dim=-1)
 
 
-def apply_rotary_pos_emb_flash(q, k, cos, sin):
+def apply_rotary_pos_emb_flash(q, k, cos, sin, unsqueeze_dim=1):
     """Apply rotary embeddings to q and k for Flash Attention"""
+    cos = cos.unsqueeze(unsqueeze_dim)
+    sin = sin.unsqueeze(unsqueeze_dim)
+
     q_embed = (q * cos) + (rotate_half(q) * sin)
     k_embed = (k * cos) + (rotate_half(k) * sin)
     return q_embed, k_embed

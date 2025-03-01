@@ -38,6 +38,17 @@ from einops import rearrange
 from logging import getLogger
 from one.linear_moe import LinearMoE
 
+# Import the turbo operations
+try:
+    from one.turbo_ops import (
+        TurboFlashAttention,
+        turbo_rotary_embedding,
+        turbo_cumsum_and_normalize,
+        TURBO_MODE,
+    )
+except ImportError:
+    TURBO_MODE = False
+
 logger = getLogger()
 
 
@@ -139,6 +150,11 @@ class OneRotaryEmbedding(nn.Module):
         if "dynamic" in self.rope_type:
             self._dynamic_frequency_update(position_ids, device=x.device)
 
+        # Use turbo implementation if available
+        # if TURBO_MODE and x.is_cuda:
+        #     return turbo_rotary_embedding(x, position_ids, self.inv_freq)
+
+        # Original implementation
         # Core RoPE block
         inv_freq_expanded = (
             self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
@@ -277,8 +293,25 @@ class One(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
         self.use_flash_attention = getattr(config, "use_flash_attention", False)
+
+        # Use TurboFlashAttention if available and flash attention is enabled
         if self.use_flash_attention:
-            self.flash_attention = OneFlashAttention(config)
+            if TURBO_MODE:
+                self.flash_attention = TurboFlashAttention(causal=True, dropout=dropout)
+                logger.info(
+                    f"Layer {layer_idx}: Using TurboFlashAttention for maximum performance"
+                )
+                # Enable combined RoPE + attention operation for maximum performance
+                self.use_turbo_combined = True
+                logger.info(
+                    f"Layer {layer_idx}: Using combined RoPE + Attention for maximum performance"
+                )
+            else:
+                self.flash_attention = OneFlashAttention(config)
+                logger.info(f"Layer {layer_idx}: Using standard FlashAttention")
+                self.use_turbo_combined = False
+        else:
+            self.use_turbo_combined = False
 
         self.reset_parameters()
 
@@ -340,7 +373,19 @@ class One(nn.Module):
         # Use gradient-friendly cumsum without out= parameter
         if s == kv_seq:
             source = norm_x[:, -s:, :]
-            hidden_state_sum = torch.cumsum(source, dim=1)
+            if TURBO_MODE and source.is_cuda:
+                hidden_state_sum = turbo_cumsum_and_normalize(source, s)
+            else:
+                hidden_state_sum = torch.cumsum(source, dim=1)
+
+                # Safe normalization to prevent division by zero
+                seq_range = torch.arange(
+                    1,
+                    kv_seq + 1,
+                    device=hidden_states.device,
+                    dtype=hidden_states.dtype,
+                ).view(1, -1, 1)
+                hidden_state_sum = hidden_state_sum / (seq_range + 1e-10)
         else:
             kv_seq -= 1
             if kv_seq > 0:
@@ -421,40 +466,107 @@ class One(nn.Module):
                 attn_weights = attn_weights.to(dtype=q.dtype)
                 single_x_processed = attn_weights * v
         else:
-            # Apply rotary embeddings
-            single_x_rotated, key_rotated = apply_rotary_pos_emb_flash(
-                single_x, key, cos, sin
-            )
+            # Use either turbo combined operation or separate operations
+            if (
+                self.use_turbo_combined
+                and TURBO_MODE
+                and compute_sequence_len == 1
+                and single_x.is_cuda
+            ):
+                # Use combined RoPE + attention CUDA kernel for maximum performance
+                from one.turbo_ops import turbo_combined_rope_attention
 
-            key_rotated = key_rotated[:, :, -compute_sequence_len:, :].contiguous()
-            value = value[:, :, -compute_sequence_len:, :].contiguous()
+                try:
+                    # Fast path: Combined RoPE and attention in a single CUDA kernel
+                    single_x_processed = turbo_combined_rope_attention(
+                        single_x,
+                        key,
+                        value,
+                        cos,
+                        sin,
+                        self.lin_q,
+                        self.lin_k,
+                        self.lin_v,
+                        compute_sequence_len,
+                    )
+                except Exception as e:
+                    # Fall back to standard path if CUDA kernel fails
+                    logger.warning(
+                        f"Turbo combined RoPE + attention failed: {e}. Falling back to standard path."
+                    )
 
-            # Standard attention with numerical stability improvements
-            q = self.lin_q(
-                single_x_rotated[:, :, -compute_sequence_len:, :].contiguous()
-            )
-            k = self.lin_k(key_rotated)
-            v = self.lin_v(value)
+                    # Apply rotary embeddings
+                    single_x_rotated, key_rotated = apply_rotary_pos_emb_flash(
+                        single_x, key, cos, sin
+                    )
 
-            # Compute attention with numerical stability
-            attn_logits = q * k
-            attn_max = torch.max(attn_logits, dim=-1, keepdim=True)[0].detach()
-            attn_logits = attn_logits - attn_max  # Subtract max for stability
+                    key_rotated = key_rotated[
+                        :, :, -compute_sequence_len:, :
+                    ].contiguous()
+                    value = value[:, :, -compute_sequence_len:, :].contiguous()
 
-            # Use float32 for softmax stability and convert back to original dtype
-            attn_weights = torch.softmax(attn_logits, dim=-1, dtype=torch.float32).to(
-                dtype=q.dtype
-            )
+                    # Standard attention with numerical stability improvements
+                    q = self.lin_q(
+                        single_x_rotated[:, :, -compute_sequence_len:, :].contiguous()
+                    )
+                    k = self.lin_k(key_rotated)
+                    v = self.lin_v(value)
 
-            # Check for NaNs in the attention weights
-            if torch.isnan(attn_weights).any():
-                # Replace NaNs with uniform attention
-                mask = torch.isnan(attn_weights)
-                attn_weights = attn_weights.masked_fill(
-                    mask, 1.0 / attn_weights.size(-1)
+                    # Compute attention with numerical stability
+                    attn_logits = q * k
+                    attn_max = torch.max(attn_logits, dim=-1, keepdim=True)[0].detach()
+                    attn_logits = attn_logits - attn_max  # Subtract max for stability
+
+                    # Use float32 for softmax stability and convert back to original dtype
+                    attn_weights = torch.softmax(
+                        attn_logits, dim=-1, dtype=torch.float32
+                    ).to(dtype=q.dtype)
+
+                    # Check for NaNs in the attention weights
+                    if torch.isnan(attn_weights).any():
+                        # Replace NaNs with uniform attention
+                        mask = torch.isnan(attn_weights)
+                        attn_weights = attn_weights.masked_fill(
+                            mask, 1.0 / attn_weights.size(-1)
+                        )
+
+                    single_x_processed = attn_weights * v
+            else:
+                # Standard path
+                # Apply rotary embeddings
+                single_x_rotated, key_rotated = apply_rotary_pos_emb_flash(
+                    single_x, key, cos, sin
                 )
 
-            single_x_processed = attn_weights * v
+                key_rotated = key_rotated[:, :, -compute_sequence_len:, :].contiguous()
+                value = value[:, :, -compute_sequence_len:, :].contiguous()
+
+                # Standard attention with numerical stability improvements
+                q = self.lin_q(
+                    single_x_rotated[:, :, -compute_sequence_len:, :].contiguous()
+                )
+                k = self.lin_k(key_rotated)
+                v = self.lin_v(value)
+
+                # Compute attention with numerical stability
+                attn_logits = q * k
+                attn_max = torch.max(attn_logits, dim=-1, keepdim=True)[0].detach()
+                attn_logits = attn_logits - attn_max  # Subtract max for stability
+
+                # Use float32 for softmax stability and convert back to original dtype
+                attn_weights = torch.softmax(
+                    attn_logits, dim=-1, dtype=torch.float32
+                ).to(dtype=q.dtype)
+
+                # Check for NaNs in the attention weights
+                if torch.isnan(attn_weights).any():
+                    # Replace NaNs with uniform attention
+                    mask = torch.isnan(attn_weights)
+                    attn_weights = attn_weights.masked_fill(
+                        mask, 1.0 / attn_weights.size(-1)
+                    )
+
+                single_x_processed = attn_weights * v
 
         # Reshape output from attention
         single_x = rearrange(

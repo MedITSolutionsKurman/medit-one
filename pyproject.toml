@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=61.0", "wheel", "torch>=2.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -43,9 +43,13 @@ training = [
 demo = [
     "gradio>=3.0.0",
 ]
+cuda = []  # A marker for CUDA extension, actual build is handled by setup.py
 
 [tool.setuptools]
 packages = ["one"]
+
+[tool.setuptools.dynamic]
+version = {attr = "one.__version__"}
 
 [tool.black]
 line-length = 88
