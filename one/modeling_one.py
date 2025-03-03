@@ -370,23 +370,10 @@ class One(nn.Module):
 
         kv_seq = norm_x.shape[1]
 
-        # Use gradient-friendly cumsum without out= parameter
-        if s == kv_seq:
-            source = norm_x[:, -s:, :]
-            if TURBO_MODE and source.is_cuda:
-                hidden_state_sum = turbo_cumsum_and_normalize(source, s)
-            else:
-                hidden_state_sum = torch.cumsum(source, dim=1)
-        else:
+        if s < kv_seq:
             kv_seq -= 1
-            if kv_seq > 0:
-                hidden_state_sum = torch.zeros_like(norm_x[:, -s:, :])
-                source_sum = torch.cumsum(norm_x, dim=1)
-                hidden_state_sum[:, -s:, :] = source_sum[:, -s:, :]
-            else:
-                hidden_state_sum = torch.zeros_like(norm_x[:, -s:, :])
 
-        hidden_state_sum = hidden_state_sum.contiguous()
+        hidden_state_sum = torch.cumsum(norm_x, dim=1)[:, -s:, :].contiguous()
 
         # Safe normalization to prevent division by zero
         seq_range = torch.arange(
