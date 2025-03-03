@@ -335,7 +335,7 @@ class One(nn.Module):
         _, s, _ = hidden_states.size()
         hx, cx = previous_state
 
-        compute_sequence_len = 1 if self.use_single_token else s
+        compute_sequence_len = 1 if self.use_single_token or not self.training else s
 
         norm_x = self.norm1(hidden_states)
 

@@ -94,23 +94,94 @@ print(tokenizer.decode(outputs[0]))
 ## Installation
 
 ```bash
-# From PyPI
+# Basic installation from PyPI (without CUDA acceleration)
 pip install medit-one
 
-# From source with CUDA acceleration
+# From source (without CUDA acceleration)
 git clone https://github.com/MedITSolutionsKurman/medit-one
 cd medit-one
 pip install -e .
+
+# From source with CUDA acceleration
+python install_cuda.py
+
+# For training capabilities only
+pip install -e ".[training]"
+
+# For full installation with all features including CUDA acceleration
+pip install -e ".[full]"
 ```
 
 ### CUDA Acceleration
 
-The CUDA Turbo backend is automatically enabled when installing from source if CUDA is available. To verify that the CUDA backend is active:
+The CUDA Turbo backend is only enabled when the CUDA extension is successfully built. To verify that the CUDA backend is active:
 
 ```python
 from one.turbo_ops import TURBO_MODE
 print(f"CUDA Turbo Mode: {'Enabled' if TURBO_MODE else 'Disabled'}")
 ```
+
+If you encounter issues with the CUDA extension installation, the most reliable method is using the separate installation script:
+
+```bash
+# Install base package first
+pip install -e .
+
+# Then build CUDA extension
+python install_cuda.py
+```
+
+## Training
+
+MedIT One includes a professional training pipeline that supports YAML-based configuration for easy experimentation and reproducibility.
+
+### Prerequisites
+
+Install training dependencies:
+
+```bash
+pip install -e ".[training]"
+```
+
+### Training Configuration
+
+Training is configured through YAML files, which specify model architecture, datasets, and training hyperparameters. An example configuration is provided in `training/example.yaml`.
+
+Key configuration sections:
+
+- `model`: Model type, checkpoint paths, and tokenizer
+- `architecture`: Model architecture parameters
+- `dataset`: Dataset sources and preprocessing options
+- `training`: Batch sizes, learning rates, and optimization parameters
+- `directories`: Output and logging paths
+- `system`: Random seed and device settings
+
+### Running Training
+
+To start training with a configuration file:
+
+```bash
+python training/train.py --config training/example.yaml
+```
+
+### Creating a New Configuration
+
+To create a custom training configuration, copy and modify the example:
+
+```bash
+cp training/example.yaml my_config.yaml
+# Edit my_config.yaml with your parameters
+python training/train.py --config my_config.yaml
+```
+
+### Training Features
+
+- **Resumable Training**: Continue training from checkpoints
+- **Memory Optimization**: Gradient checkpointing and mixed precision training
+- **8-bit Optimizers**: Efficient training with bitsandbytes 8-bit optimizers
+- **Evaluation**: Integrated model evaluation during training
+- **Logging**: Detailed logging with TensorBoard compatibility
+- **NEFTune**: Built-in support for NEFTune noise during training
 
 ## Citation
 

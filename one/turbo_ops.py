@@ -13,32 +13,83 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 import os
+import sys
+import importlib
+import importlib.util
 import torch
 from typing import Optional, Tuple
 import warnings
 
 # Try to import the CUDA-accelerated implementation from the root-level extension
 TURBO_MODE = False
-try:
-    # Import from root-level extension instead of one/csrc
-    import one_turbo
-    from one_turbo import (
+
+
+def check_for_cuda_extension():
+    """Check multiple locations for the CUDA extension."""
+    # Check if the one_turbo module is directly importable
+    try:
+        import one_turbo
+
+        return one_turbo
+    except ImportError:
+        pass
+
+    # Check if the extension was built by install_cuda.py
+    try:
+        # Get the package directory
+        package_dir = os.path.dirname(os.path.abspath(__file__))
+        # Check if we have the marker file indicating successful CUDA installation
+        cuda_marker = os.path.join(package_dir, "cuda_installed")
+        if os.path.exists(cuda_marker):
+            # Try to find the extension in build directory
+            build_dir = os.path.join(os.path.dirname(package_dir), "build")
+            for root, dirs, files in os.walk(build_dir):
+                for file in files:
+                    if file.startswith("one_turbo") and file.endswith((".so", ".pyd")):
+                        extension_path = os.path.join(root, file)
+                        # Try to load the extension from this path
+                        spec = importlib.util.spec_from_file_location(
+                            "one_turbo", extension_path
+                        )
+                        if spec:
+                            module = importlib.util.module_from_spec(spec)
+                            spec.loader.exec_module(module)
+                            return module
+    except Exception as e:
+        warnings.warn(f"Error loading CUDA extension from build directory: {e}")
+
+    return None
+
+
+# Try to load the CUDA extension
+extension = check_for_cuda_extension()
+if extension:
+    # Extract the functions from the extension
+    flash_attention = getattr(extension, "flash_attention", None)
+    moe_routing = getattr(extension, "moe_routing", None)
+    rotary_embedding = getattr(extension, "rotary_embedding", None)
+    cumsum_and_normalize = getattr(extension, "cumsum_and_normalize", None)
+    combined_rope_attention = getattr(extension, "combined_rope_attention", None)
+
+    # Verify that we have all expected functions
+    required_functions = [
         flash_attention,
         moe_routing,
         rotary_embedding,
         cumsum_and_normalize,
         combined_rope_attention,
-    )
+    ]
+    if all(required_functions):
+        TURBO_MODE = True
+        print("One Turbo backend enabled!")
+    else:
+        warnings.warn("One Turbo extension found but missing some required functions.")
 
-    TURBO_MODE = True
-    print("One Turbo backend enabled!")
-except ImportError:
+if not TURBO_MODE:
     warnings.warn(
         "One Turbo backend not available. Running in fallback mode. "
-        "To enable turbo mode, compile the CUDA extension with: "
-        "pip install -e ."
+        "To enable turbo mode, run: python install_cuda.py"
     )
 
 
@@ -52,31 +103,26 @@ def turbo_flash_attention(
     """
     Optimized flash attention implementation that uses CUDA kernels when available.
     Falls back to optimized PyTorch implementation when CUDA extension is not available.
-
     Args:
         q: Query tensor [batch_size, n_heads, seq_len, head_dim]
         k: Key tensor [batch_size, n_heads, seq_len, head_dim]
         v: Value tensor [batch_size, n_heads, seq_len, head_dim]
         causal: Whether to apply causal masking
         scale_factor: Optional scaling factor. If None, uses 1/sqrt(head_dim)
-
     Returns:
         output: Attention output [batch_size, n_heads, seq_len, head_dim]
     """
     # Apply scaling if not provided
     if scale_factor is None:
         scale_factor = 1.0 / (q.size(-1) ** 0.5)
-
     if TURBO_MODE and q.is_cuda:
         # Call CUDA implementation
         return flash_attention(q, k, v, causal, scale_factor)
     else:
         # Fallback implementation in PyTorch
         q = q * scale_factor
-
         # Compute attention scores
         scores = torch.matmul(q, k.transpose(-1, -2))
-
         # Apply causal mask if needed
         if causal:
             mask = torch.triu(
@@ -89,14 +135,11 @@ def turbo_flash_attention(
                 diagonal=1,
             )
             scores.masked_fill_(mask, float("-inf"))
-
         # Apply softmax
         attention_weights = torch.softmax(scores, dim=-1, dtype=torch.float32)
         attention_weights = attention_weights.to(dtype=q.dtype)
-
         # Apply attention
         output = torch.matmul(attention_weights, v)
-
         return output
 
 
@@ -218,20 +261,53 @@ def turbo_cumsum_and_normalize(x: torch.Tensor, seq_len: int) -> torch.Tensor:
     Returns:
         normalized_tensor: Normalized tensor after cumsum
     """
+    original_dtype = x.dtype
+
     if TURBO_MODE and x.is_cuda:
-        # Call CUDA implementation
-        return cumsum_and_normalize(x, seq_len)
+        try:
+            # Convert to float32 if BFloat16 since CUDA kernel doesn't support BFloat16
+            if x.dtype == torch.bfloat16:
+                x_float = x.to(torch.float32)
+                result = cumsum_and_normalize(x_float, seq_len)
+                # Convert back to original dtype
+                return result.to(original_dtype)
+            else:
+                # Call CUDA implementation directly for supported dtypes
+                return cumsum_and_normalize(x, seq_len)
+        except RuntimeError as e:
+            # Handle other potential runtime errors by falling back to CPU
+            warnings.warn(
+                f"CUDA cumsum_and_normalize failed: {e}, falling back to CPU implementation"
+            )
+            return turbo_cumsum_and_normalize_cpu(x, seq_len, original_dtype)
     else:
-        # Fallback implementation
-        result = torch.cumsum(x, dim=1)
+        # Use CPU fallback
+        return turbo_cumsum_and_normalize_cpu(x, seq_len, original_dtype)
 
-        # Create normalizer
-        seq_range = torch.arange(1, seq_len + 1, device=x.device, dtype=x.dtype).view(
-            1, -1, 1
-        )
 
-        # Normalize
-        return result / (seq_range + 1e-8)
+def turbo_cumsum_and_normalize_cpu(
+    x: torch.Tensor, seq_len: int, original_dtype: torch.dtype
+) -> torch.Tensor:
+    """CPU fallback with proper dtype handling for cumsum and normalize."""
+    # Use float32 for better precision in CPU implementation
+    x_float = x.to(torch.float32) if x.dtype != torch.float32 else x
+
+    # Fallback implementation
+    result = torch.cumsum(x_float, dim=1)
+
+    # Create normalizer with exact size
+    seq_range = torch.arange(1, seq_len + 1, device=x.device, dtype=torch.float32).view(
+        1, -1, 1
+    )
+
+    # Normalize
+    result = result / (seq_range + 1e-8)
+
+    # Convert back to original dtype
+    if original_dtype != torch.float32:
+        result = result.to(original_dtype)
+
+    return result
 
 
 def turbo_combined_rope_attention(

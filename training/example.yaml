@@ -1,0 +1,55 @@
+# Example training configuration for MedIT ONE model
+
+# Model configuration
+model:
+  name: "one"                      # Model type ('one' supported)
+  checkpoint: null                 # Path to model checkpoint or null
+  trainer_checkpoint: null         # Path to trainer checkpoint or null
+  tokenizer_name: "gpt2"           # Tokenizer to use
+
+# Architecture parameters
+architecture:
+  num_layers: 24                   # Number of transformer layers
+  num_heads: 24                    # Number of attention heads
+  hidden_size: 4096                # Hidden dimension size
+  transformer_dim: 1024            # Transformer dimension
+  intermediate_size: 11008         # Intermediate size for FFN
+  max_model_length: 131072           # Maximum sequence length supported by model
+  torch_dtype: "bfloat16"          # Model dtype: "float32", "float16", "bfloat16"
+  use_flash_attention: true        # Whether to use flash attention
+  use_single_token: false          # Whether to use single token optimization
+
+# Dataset parameters
+dataset:
+  train: "airtrain-ai/fineweb-edu-fortified"  # Dataset identifier
+  config_name: "CC-MAIN-2024-10"               # Dataset name/version if applicable
+  cache_dir: "/tmp/hf_cache"                   # Dataset cache directory
+  max_length: 512                   # Maximum sequence length for training
+  train_test_split: 0.1             # Fraction for test split
+  skip: 0                           # Skip this many examples
+  take: null                        # Take only this many examples (null for all)
+  num_proc: 4                       # Number of preprocessing workers
+
+# Training parameters
+training:
+  batch_size: 32                    # Batch size per device
+  accumulation_iter: 128            # Gradient accumulation steps
+  epochs: 1                         # Number of training epochs
+  lr: 5.0e-5                        # Learning rate
+  warmup_steps: 500                 # Learning rate warmup steps
+  weight_decay: 0.01                # Weight decay
+  save_steps: 500                   # Save checkpoint every N steps
+  neftune_noise_alpha: 0.1          # NEFTune noise alpha
+  save_total_limit: 1               # Maximum number of checkpoints to keep
+  betas: [0.9, 0.999]               # Adam optimizer betas
+  eps: 1.0e-8                       # Adam optimizer epsilon
+
+# Directories
+directories:
+  logging_dir: "./logs"             # Directory for logs
+  output_dir: "./results"           # Directory for model outputs
+
+# System
+system:
+  seed: 42                          # Random seed
+  device: "gpu"                     # "cpu" or "gpu"
