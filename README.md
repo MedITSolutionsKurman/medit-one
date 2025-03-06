@@ -4,6 +4,10 @@
 
 MedIT One is an innovative transformer architecture that dramatically improves inference speed and memory efficiency by leveraging a novel combination of techniques from both transformer and recurrent neural networks.
 
+Checkpoints:
+- [140M after 9B tokens](https://huggingface.co/meditsolutions/medit-one-140M-9B-tokens-checkpoint)
+- [98M after 6B tokens](https://huggingface.co/meditsolutions/medit-one-140M-6B-tokens-checkpoint)
+
 ## Key Innovations
 
 ### Single-Token Prediction
