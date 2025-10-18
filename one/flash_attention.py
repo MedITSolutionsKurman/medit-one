@@ -13,8 +13,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import torch
 import math
+import warnings
+
+import torch
+
+try:
+    from .triton_kernels import (
+        TRITON_AVAILABLE as TRITON_KERNELS_AVAILABLE,
+        apply_rotary_pos_emb_triton,
+    )
+except ImportError:  # pragma: no cover - optional dependency
+    TRITON_KERNELS_AVAILABLE = False
+    apply_rotary_pos_emb_triton = None
 
 
 def rotate_half(x):
@@ -27,6 +38,21 @@ def apply_rotary_pos_emb_flash(q, k, cos, sin, unsqueeze_dim=1):
     """Apply rotary embeddings to q and k for Flash Attention"""
     cos = cos.unsqueeze(unsqueeze_dim)
     sin = sin.unsqueeze(unsqueeze_dim)
+
+    if (
+        TRITON_KERNELS_AVAILABLE
+        and q.is_cuda
+        and k.is_cuda
+        and cos.device.type == "cuda"
+        and sin.device.type == "cuda"
+    ):
+        try:
+            return apply_rotary_pos_emb_triton(q, k, cos, sin)
+        except RuntimeError as exc:
+            warnings.warn(
+                f"Triton rotary embedding kernel failed, falling back to PyTorch: {exc}",
+                stacklevel=2,
+            )
 
     q_embed = (q * cos) + (rotate_half(q) * sin)
     k_embed = (k * cos) + (rotate_half(k) * sin)

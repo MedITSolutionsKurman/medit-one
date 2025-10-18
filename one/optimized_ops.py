@@ -13,9 +13,20 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import warnings
+
 import torch
 import torch.nn.functional as F
 from einops import rearrange
+
+try:
+    from .triton_kernels import (
+        TRITON_AVAILABLE as TRITON_KERNELS_AVAILABLE,
+        fused_rope_attention_triton,
+    )
+except ImportError:  # pragma: no cover - optional dependency
+    TRITON_KERNELS_AVAILABLE = False
+    fused_rope_attention_triton = None
 
 
 def optimized_cumsum_and_normalize(x, s):
@@ -44,6 +55,22 @@ def optimized_cumsum_and_normalize(x, s):
 
 def fused_rope_attention(q, k, v, cos, sin):
     """Fused implementation of RoPE attention for better performance"""
+    if (
+        TRITON_KERNELS_AVAILABLE
+        and q.is_cuda
+        and k.is_cuda
+        and v.is_cuda
+        and cos.device.type == "cuda"
+        and sin.device.type == "cuda"
+    ):
+        try:
+            return fused_rope_attention_triton(q, k, v, cos, sin)
+        except RuntimeError as exc:
+            warnings.warn(
+                f"Triton fused RoPE attention failed, using PyTorch fallback: {exc}",
+                stacklevel=2,
+            )
+
     # Apply rotary position embeddings
     q_embed = (q * cos) + (rotate_half(q) * sin)
     k_embed = (k * cos) + (rotate_half(k) * sin)
